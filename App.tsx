@@ -46,6 +46,7 @@ export default function App() {
   // Participants
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [activeScreenId, setActiveScreenId] = useState<string | null>(null);
+  const [screenFrames, setScreenFrames] = useState<Record<string, { frame: string; updatedAt: number }>>({});
 
   // Local Media
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
@@ -73,6 +74,8 @@ export default function App() {
   const liveClient = useRef<LiveClient | null>(null);
   // Unique ID for this browser session to track "self" in the database
   const mySessionId = useRef<string>(Math.random().toString(36).substring(2, 15));
+  const screenCaptureInterval = useRef<number | null>(null);
+  const screenCaptureVideoRef = useRef<HTMLVideoElement | null>(null);
 
   // --- Effects ---
   
@@ -162,6 +165,7 @@ export default function App() {
     if (step !== 'meeting' || !meetingId || !isAuthReady) return;
 
     const meetingRef = ref(db, `meetings/${meetingId}/participants`);
+    const screensRef = ref(db, `meetings/${meetingId}/screens`);
     
     // Subscribe to participant changes
     const unsubscribe = onValue(meetingRef, (snapshot) => {
@@ -206,7 +210,15 @@ export default function App() {
         }
     });
 
-    return () => unsubscribe();
+    const unsubscribeScreens = onValue(screensRef, (snapshot) => {
+      const data = snapshot.val();
+      setScreenFrames(data || {});
+    });
+
+    return () => {
+      unsubscribe();
+      unsubscribeScreens();
+    };
   }, [step, meetingId, isAuthReady]);
 
 
@@ -365,6 +377,9 @@ export default function App() {
     if (meetingId && mySessionId.current && isAuthReady) {
         const userRef = ref(db, `meetings/${meetingId}/participants/${mySessionId.current}`);
         remove(userRef).catch(console.error);
+
+        const screenRef = ref(db, `meetings/${meetingId}/screens/${mySessionId.current}`);
+        remove(screenRef).catch(console.error);
     }
 
     // Reset State
@@ -375,8 +390,18 @@ export default function App() {
 
     if (localStream) localStream.getTracks().forEach(t => t.stop());
     if (screenStream) screenStream.getTracks().forEach(t => t.stop());
+    if (screenCaptureInterval.current) {
+      window.clearInterval(screenCaptureInterval.current);
+      screenCaptureInterval.current = null;
+    }
+    if (screenCaptureVideoRef.current) {
+      screenCaptureVideoRef.current.pause();
+      screenCaptureVideoRef.current.srcObject = null;
+      screenCaptureVideoRef.current = null;
+    }
     setLocalStream(null);
     setScreenStream(null);
+    setScreenFrames({});
     setViewMode(ViewMode.GALLERY);
     setActiveScreenId(null);
     if (liveClient.current) liveClient.current.disconnect();
@@ -420,6 +445,17 @@ export default function App() {
         setViewMode(ViewMode.GALLERY);
       }
       updateMyStatus({ isScreenSharing: false });
+      if (screenCaptureInterval.current) {
+        window.clearInterval(screenCaptureInterval.current);
+        screenCaptureInterval.current = null;
+      }
+      if (screenCaptureVideoRef.current) {
+        screenCaptureVideoRef.current.pause();
+        screenCaptureVideoRef.current.srcObject = null;
+        screenCaptureVideoRef.current = null;
+      }
+      const screenRef = ref(db, `meetings/${meetingId}/screens/${mySessionId.current}`);
+      remove(screenRef).catch(console.error);
       return;
     }
 
@@ -429,11 +465,51 @@ export default function App() {
       setActiveScreenId(mySessionId.current);
       setViewMode(ViewMode.SCREEN_SHARE);
       updateMyStatus({ isScreenSharing: true });
-      
+
+      const videoEl = document.createElement('video');
+      videoEl.srcObject = stream;
+      videoEl.muted = true;
+      videoEl.playsInline = true;
+      videoEl.play().catch(() => {});
+      screenCaptureVideoRef.current = videoEl;
+
+      const screenRef = ref(db, `meetings/${meetingId}/screens/${mySessionId.current}`);
+
+      const captureFrame = async () => {
+        try {
+          const track = stream.getVideoTracks()[0];
+          if (!track || !screenCaptureVideoRef.current) return;
+          const settings = track.getSettings();
+          const canvas = document.createElement('canvas');
+          canvas.width = settings.width || 1280;
+          canvas.height = settings.height || 720;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) return;
+          ctx.drawImage(screenCaptureVideoRef.current, 0, 0, canvas.width, canvas.height);
+          const frame = canvas.toDataURL('image/jpeg', 0.6);
+          await set(screenRef, { frame, updatedAt: Date.now() });
+        } catch (err) {
+          console.error('Failed to capture screen frame', err);
+        }
+      };
+
+      await captureFrame();
+      screenCaptureInterval.current = window.setInterval(captureFrame, 2000);
+
       stream.getVideoTracks()[0].onended = () => {
         setScreenStream(null);
         setActiveScreenId(prev => prev === mySessionId.current ? null : prev);
         updateMyStatus({ isScreenSharing: false });
+        if (screenCaptureInterval.current) {
+          window.clearInterval(screenCaptureInterval.current);
+          screenCaptureInterval.current = null;
+        }
+        if (screenCaptureVideoRef.current) {
+          screenCaptureVideoRef.current.pause();
+          screenCaptureVideoRef.current.srcObject = null;
+          screenCaptureVideoRef.current = null;
+        }
+        remove(screenRef).catch(console.error);
       };
     } catch (err) {
       console.error("Screen share cancelled or failed", err);
@@ -848,19 +924,24 @@ export default function App() {
            <div className="flex-1 flex p-4 gap-4 overflow-hidden">
               <div className="flex-1 bg-black rounded-2xl overflow-hidden relative border border-gray-800 flex items-center justify-center">
                  {activeScreenId === mySessionId.current && screenStream ? (
-                    <video 
-                      ref={ref => ref && (ref.srcObject = screenStream)} 
-                      autoPlay 
-                      playsInline 
+                    <video
+                      ref={ref => ref && (ref.srcObject = screenStream)}
+                      autoPlay
+                      playsInline
                       className="w-full h-full object-contain"
+                    />
+                 ) : screenFrames[activeScreenId]?.frame ? (
+                    <img
+                      src={screenFrames[activeScreenId].frame}
+                      alt={`Демонстрация ${sharer?.name}`}
+                      className="w-full h-full object-contain bg-black"
                     />
                  ) : (
                     <div className="flex flex-col items-center text-gray-500 p-8 text-center">
                        <MonitorUpIcon className="w-24 h-24 mb-4 opacity-20 animate-pulse" />
                        <p className="text-xl font-semibold">Демонстрация экрана: {sharer?.name}</p>
                        <p className="text-sm mt-2 max-w-md text-gray-600">
-                           В настоящем приложении здесь был бы видеопоток через WebRTC. 
-                           Сейчас мы синхронизируем только статус демонстрации через Firebase.
+                           Ждем первый кадр трансляции...
                        </p>
                     </div>
                  )}
