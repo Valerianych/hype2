@@ -172,7 +172,7 @@ export default function App() {
       const data = snapshot.val();
       if (data) {
         const participantList: Participant[] = Object.values(data);
-        
+
         // If I was kicked (my ID is no longer in the list), leave
         const amIStillHere = participantList.some(p => p.id === mySessionId.current);
         if (!amIStillHere) {
@@ -182,11 +182,16 @@ export default function App() {
         }
 
         // Update screen share active ID
-        const sharer = participantList.find(p => p.isScreenSharing);
-        if (sharer && !activeScreenId) {
-             setActiveScreenId(sharer.id);
+        const sharers = participantList.filter(p => p.isScreenSharing);
+        const hasSharers = sharers.length > 0;
+
+        if (hasSharers) {
+             setActiveScreenId((current) => {
+                 const currentActiveExists = current && sharers.some(s => s.id === current);
+                 return currentActiveExists ? current : sharers[0].id;
+             });
              setViewMode(ViewMode.SCREEN_SHARE);
-        } else if (!sharer && activeScreenId) {
+        } else {
              setActiveScreenId(null);
              setViewMode(ViewMode.GALLERY);
         }
