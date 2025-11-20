@@ -184,7 +184,8 @@ export default function App() {
         // Update screen share active ID
         const sharer = participantList.find(p => p.isScreenSharing);
         if (sharer && !activeScreenId) {
-             // Auto switch logic could go here
+             setActiveScreenId(sharer.id);
+             setViewMode(ViewMode.SCREEN_SHARE);
         } else if (!sharer && activeScreenId) {
              setActiveScreenId(null);
              setViewMode(ViewMode.GALLERY);
